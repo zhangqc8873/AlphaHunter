@@ -43,6 +43,7 @@ max_check = st.sidebar.slider("指标检查股票数上限", 10, 200, int(DEFAUL
 
 st.sidebar.markdown("### 价格跟踪设置")
 track_days = st.sidebar.slider("跟踪区间天数", 30, 180, 90)
+sleep_seconds = st.sidebar.number_input("每请求休眠秒数", value=float(DEFAULT_CONFIG.per_request_sleep_sec), min_value=0.0, step=0.1)
 
 run_btn = st.sidebar.button("运行筛选")
 
@@ -53,6 +54,7 @@ def apply_indicator_config():
     DEFAULT_CONFIG.indicator_macd_hist_min = float(macd_hist_min)
     DEFAULT_CONFIG.indicator_lookback_days = int(lookback_days)
     DEFAULT_CONFIG.max_symbols_indicator_check = int(max_check)
+    DEFAULT_CONFIG.per_request_sleep_sec = float(sleep_seconds)
 
 
 @st.cache_data(show_spinner=False)
@@ -79,22 +81,39 @@ if run_btn:
             end_date = yyyyMMdd(today)
             start_date = yyyyMMdd(today - dt.timedelta(days=track_days))
             tabs = st.tabs([f"{code}" for code in selected_codes])
-            for tab, code in zip(tabs, selected_codes):
+            progress = st.progress(0)
+            source_counts = {"em": 0, "sina": 0, "tx": 0}
+            failed_codes: List[str] = []
+            for idx, (tab, code) in enumerate(zip(tabs, selected_codes), start=1):
                 with tab:
                     hist = get_symbol_hist_range(code, start_date=start_date, end_date=end_date, use_cache=True)
                     if hist is None or hist.empty:
-                        st.warning("该股票区间数据不可用")
+                        failed_codes.append(code)
+                        st.warning("该股票区间数据不可用（已自动重试多个数据源）")
+                        progress.progress(int(idx / len(selected_codes) * 100))
                         continue
                     hist = hist.copy()
+                    # 统计数据源
+                    if "source" in hist.columns:
+                        src = str(hist["source"].iloc[0])
+                        if src in source_counts:
+                            source_counts[src] += 1
+                    # 日期与列检查
                     if "日期" in hist.columns:
                         hist["日期"] = pd.to_datetime(hist["日期"])
                     if "close" not in hist.columns:
                         st.warning("缺少收盘价，无法绘图")
+                        progress.progress(int(idx / len(selected_codes) * 100))
                         continue
+                    # 指标计算
                     close = pd.to_numeric(hist["close"], errors="coerce")
                     hist["RSI"] = compute_rsi(close, window=DEFAULT_CONFIG.rsi_window)
                     macd_df = compute_macd(close, fast=DEFAULT_CONFIG.macd_fast, slow=DEFAULT_CONFIG.macd_slow, signal=DEFAULT_CONFIG.macd_signal)
                     hist["MACD_hist"] = macd_df["hist"].values
+
+                    # 简要数据源标注
+                    if "source" in hist.columns:
+                        st.caption(f"数据源：{hist['source'].iloc[0]}")
 
                     # 上方K线/收盘价折线，下方RSI与MACD柱体
                     st.line_chart(hist.set_index("日期")["close"], height=200)
@@ -116,6 +135,14 @@ if run_btn:
                         perf_col[2].metric("RSI(末值)", f"{hist['RSI'].iloc[-1]:.1f}")
                     except Exception:
                         pass
+
+                progress.progress(int(idx / len(selected_codes) * 100))
+
+            with st.expander("数据源与失败统计"):
+                total = len(selected_codes)
+                st.write({"总数": total, "失败数": len(failed_codes), "东财": source_counts["em"], "新浪": source_counts["sina"], "腾讯": source_counts["tx"]})
+                if failed_codes:
+                    st.write("失败代码：", ", ".join(failed_codes))
 
         # 导出筛选结果
         st.download_button(
