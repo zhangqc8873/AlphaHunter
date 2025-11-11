@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import List
+from typing import List, Optional, Callable, Dict, Tuple
 
 import pandas as pd
 
@@ -187,6 +187,80 @@ def get_strong_stocks_comprehensive(target_date: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def get_strong_stocks_comprehensive_with_stats(target_date: str, progress_cb: Optional[Callable[[int, str], None]] = None) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """与 get_strong_stocks_comprehensive 等价，但返回统计信息并支持进度回调。
+
+    progress_cb 接收两个参数：step_index（从 1 开始）与 step_label。
+    统计信息包含各阶段候选数量与最终数量：
+      - direct_count, hot_count, lhb_count, sector_count, final_count
+    若启用指标过滤，则还包含 filtered_count（过滤后数量）。
+    """
+    stats: Dict[str, int] = {"direct_count": 0, "hot_count": 0, "lhb_count": 0, "sector_count": 0, "final_count": 0}
+    all_strong: List[pd.DataFrame] = []
+
+    # 1. 现成榜单
+    if progress_cb:
+        progress_cb(1, "获取现成强势股榜单")
+    direct_df = get_strong_stocks_direct(target_date, use_cache=True)
+    if direct_df is not None and not direct_df.empty:
+        stats["direct_count"] = len(direct_df)
+        all_strong.append(direct_df)
+
+    time.sleep(DEFAULT_CONFIG.per_request_sleep_sec)
+
+    # 1b. 人气榜
+    if progress_cb:
+        progress_cb(2, "获取人气榜股票")
+    hot_df = get_strong_stocks_hot(target_date, use_cache=True)
+    if hot_df is not None and not hot_df.empty:
+        stats["hot_count"] = len(hot_df)
+        all_strong.append(hot_df)
+
+    # 2. 龙虎榜
+    if progress_cb:
+        progress_cb(3, "获取龙虎榜股票")
+    lhb_df = get_strong_stocks_billboard(target_date, use_cache=True)
+    if lhb_df is not None and not lhb_df.empty:
+        stats["lhb_count"] = len(lhb_df)
+        all_strong.append(lhb_df)
+
+    time.sleep(DEFAULT_CONFIG.per_request_sleep_sec)
+
+    # 3. 板块轮动补充
+    combined_count = sum(len(df) for df in all_strong)
+    if combined_count < 20:
+        if progress_cb:
+            progress_cb(4, "板块轮动补充")
+        sector_df = get_strong_stocks_via_sector(target_date, use_cache=True)
+        if sector_df is not None and not sector_df.empty:
+            stats["sector_count"] = len(sector_df)
+            all_strong.append(sector_df)
+
+    # 合并与去重
+    if all_strong:
+        final = pd.concat(all_strong, ignore_index=True)
+        final = _ensure_code_col(final)
+        if "代码" in final.columns:
+            final = final.drop_duplicates(subset=["代码"], keep="first")
+        stats["final_count"] = len(final)
+
+        # 指标过滤辅助（可配置）
+        if DEFAULT_CONFIG.enable_indicator_filter and "代码" in final.columns:
+            if progress_cb:
+                progress_cb(5, "指标过滤 (RSI/MACD)")
+            filtered = _apply_indicator_filter(final, target_date)
+            stats["filtered_count"] = len(filtered)
+            return filtered, stats
+        else:
+            if progress_cb:
+                progress_cb(5, "完成")
+            return final, stats
+    else:
+        if progress_cb:
+            progress_cb(5, "未找到强势股")
+        return pd.DataFrame(), stats
+
+
 def _apply_indicator_filter(df: pd.DataFrame, date: str) -> pd.DataFrame:
     """在合并结果上应用轻量指标过滤：RSI>=阈值且MACD柱体>=阈值。
 
@@ -196,8 +270,8 @@ def _apply_indicator_filter(df: pd.DataFrame, date: str) -> pd.DataFrame:
     """
     limit = min(len(df), DEFAULT_CONFIG.max_symbols_indicator_check)
     subset = df.head(limit).copy()
-    rsi_vals: List[float | None] = []
-    macd_hist_vals: List[float | None] = []
+    rsi_vals: List[Optional[float]] = []
+    macd_hist_vals: List[Optional[float]] = []
 
     for code in subset["代码"].astype(str).tolist():
         start = _offset_days(date, DEFAULT_CONFIG.indicator_lookback_days)

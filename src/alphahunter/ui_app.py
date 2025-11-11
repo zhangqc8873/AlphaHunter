@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "src"))
 
 from alphahunter.config import DEFAULT_CONFIG
-from alphahunter.strategies import get_strong_stocks_comprehensive
+from alphahunter.strategies import get_strong_stocks_comprehensive, get_strong_stocks_comprehensive_with_stats
 from alphahunter.data_fetch import get_symbol_hist_range
 from alphahunter.filters import compute_rsi, compute_macd
 
@@ -61,15 +61,29 @@ def apply_indicator_config():
 def run_screening(date: str) -> pd.DataFrame:
     return get_strong_stocks_comprehensive(date)
 
+def run_screening_with_progress(date: str):
+    steps_total = 5
+    prog = st.progress(0)
+    step_text = st.empty()
+    def _cb(step_idx: int, label: str):
+        prog.progress(int(max(0, min(step_idx, steps_total)) / steps_total * 100))
+        step_text.write(f"阶段 {step_idx}/{steps_total}: {label}")
+    df, stats = get_strong_stocks_comprehensive_with_stats(date, progress_cb=_cb)
+    prog.progress(100)
+    return df, stats
+
 
 if run_btn:
     apply_indicator_config()
     with st.spinner("正在获取并筛选强势股..."):
-        result_df = run_screening(target_date)
+        # 带进度的筛选
+        result_df, stats = run_screening_with_progress(target_date)
     if result_df is None or result_df.empty:
         st.warning("未找到强势股或数据源暂不可用。")
     else:
         st.success(f"找到 {len(result_df)} 只强势股")
+        with st.expander("筛选阶段统计"):
+            st.write(stats)
         st.dataframe(result_df, use_container_width=True)
 
         # 选择个股进行跟踪
