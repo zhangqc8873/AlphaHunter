@@ -17,6 +17,12 @@ sys.path.append(str(ROOT / "src"))
 from alphahunter.config import DEFAULT_CONFIG
 from alphahunter.strategies import get_strong_stocks_comprehensive, get_strong_stocks_comprehensive_with_stats
 from alphahunter.data_fetch import get_symbol_hist_range
+from alphahunter.realtime_service import (
+    save_config as rt_save_config,
+    load_config as rt_load_config,
+    read_latest_snapshot,
+    is_trading_time_now,
+)
 from alphahunter.filters import compute_rsi, compute_macd
 
 
@@ -106,13 +112,54 @@ if result_df is not None and not result_df.empty:
 
     # 选择个股进行跟踪（持久化选中项）
     codes = result_df["代码"].astype(str).tolist() if "代码" in result_df.columns else []
+    # 注意：避免同时使用 default 参数与 Session State 赋值，
+    # 否则会出现“The widget with key ... was created with a default value but also had its value set via the Session State API.”告警。
     st.multiselect(
         "选择需要跟踪的股票代码",
         options=codes,
-        default=st.session_state.get("selected_codes", []),
         key="selected_codes",
         help="选择后页面即会重载，但已选项会被保留。",
     )
+
+    # 实时状态与提醒设置
+    st.markdown("---")
+    st.subheader("实时状态")
+    cfg = rt_load_config()
+    default_codes = st.session_state.get("selected_codes", cfg.get("tracked_codes", []))
+    poll_min_default = int(cfg.get("poll_interval_sec", 300)) // 60
+    alert_pct_default = float(cfg.get("alert_threshold_pct", 3.0))
+    retention_days_default = int(cfg.get("retention_days", 7))
+
+    with st.sidebar:
+        st.markdown("### 实时跟踪设置")
+        poll_minutes = st.number_input("实时轮询间隔（分钟）", min_value=1, max_value=60, value=poll_min_default)
+        alert_thresh = st.number_input("预警阈值（%）", min_value=0.1, max_value=20.0, value=alert_pct_default, step=0.1)
+        retention_days = st.number_input("保留天数", min_value=1, max_value=30, value=retention_days_default)
+        if st.button("保存实时跟踪配置"):
+            new_cfg = {
+                "tracked_codes": default_codes,
+                "poll_interval_sec": int(poll_minutes * 60),
+                "alert_threshold_pct": float(alert_thresh),
+                "retention_days": int(retention_days),
+            }
+            rt_save_config(new_cfg)
+            st.success("配置已保存。后台服务将读取此配置。")
+
+    trading = is_trading_time_now()
+    st.caption(f"交易时段状态：{'在交易' if trading else '休市'}")
+
+    latest_df = read_latest_snapshot()
+    if latest_df is None or len(latest_df) == 0:
+        st.info("尚无实时快照，请启动后台服务进程以采集数据。")
+        st.code("python -m alphahunter.realtime_service", language="bash")
+    else:
+        # 按选择过滤显示
+        if "代码" in latest_df.columns and default_codes:
+            show_df = latest_df[latest_df["代码"].isin(default_codes)].copy()
+        else:
+            show_df = latest_df.copy()
+        cols = [c for c in ["采集时间", "代码", "名称", "最新价", "close", "pct_chg", "alert", "状态"] if c in show_df.columns]
+        st.dataframe(show_df[cols], use_container_width=True)
 
     # 价格跟踪可视化
     selected_codes = st.session_state.get("selected_codes", [])
