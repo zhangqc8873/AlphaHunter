@@ -28,6 +28,7 @@ from alphahunter.realtime_service import (
 from alphahunter.filters import compute_rsi, compute_macd
 import subprocess
 import os
+import json
 
 
 st.set_page_config(page_title="AlphaHunter 强势股跟踪", layout="wide")
@@ -66,6 +67,50 @@ if "stats" not in st.session_state:
 if "selected_codes" not in st.session_state:
     st.session_state["selected_codes"] = []
 
+# ===== 持久化存储路径与工具函数 =====
+UI_CACHE_DIR = Path(DEFAULT_CONFIG.cache_dir) / "ui"
+try:
+    UI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
+
+LAST_RESULT_PATH = UI_CACHE_DIR / "last_result.csv"
+LAST_STATS_PATH = UI_CACHE_DIR / "last_stats.json"
+SELECTED_CODES_PATH = UI_CACHE_DIR / "selected_codes.json"
+LAST_DATE_PATH = UI_CACHE_DIR / "last_date.txt"
+
+def _save_ui_state(result_df: pd.DataFrame | None, stats: dict | None, selected_codes: List[str] | None, date_str: str | None):
+    try:
+        if result_df is not None and not result_df.empty:
+            result_df.to_csv(LAST_RESULT_PATH, index=False, encoding="utf-8-sig")
+        if isinstance(stats, dict):
+            LAST_STATS_PATH.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+        if selected_codes is not None:
+            SELECTED_CODES_PATH.write_text(json.dumps(list(selected_codes), ensure_ascii=False), encoding="utf-8")
+        if date_str:
+            LAST_DATE_PATH.write_text(str(date_str), encoding="utf-8")
+    except Exception:
+        # 静默失败，不影响页面展示
+        pass
+
+def _load_ui_state():
+    res_df = pd.DataFrame()
+    stats_obj = None
+    codes = []
+    date_str = None
+    try:
+        if LAST_RESULT_PATH.exists():
+            res_df = pd.read_csv(LAST_RESULT_PATH)
+        if LAST_STATS_PATH.exists():
+            stats_obj = json.loads(LAST_STATS_PATH.read_text(encoding="utf-8"))
+        if SELECTED_CODES_PATH.exists():
+            codes = json.loads(SELECTED_CODES_PATH.read_text(encoding="utf-8"))
+        if LAST_DATE_PATH.exists():
+            date_str = LAST_DATE_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return res_df, stats_obj, codes, date_str
+
 
 def apply_indicator_config():
     DEFAULT_CONFIG.enable_indicator_filter = enable_ind
@@ -103,6 +148,23 @@ if run_btn:
     if result_df is not None and not result_df.empty:
         codes_default = result_df["代码"].astype(str).tolist()[: min(10, len(result_df))] if "代码" in result_df.columns else []
         st.session_state["selected_codes"] = codes_default
+    # 持久化到本地文件，便于下次自动恢复
+    _save_ui_state(st.session_state.get("result_df"), st.session_state.get("stats"), st.session_state.get("selected_codes"), target_date)
+else:
+    # 若未点击运行按钮，尝试从本地文件恢复上次状态
+    try:
+        res_df, stats_obj, codes, last_date = _load_ui_state()
+        if res_df is not None and not res_df.empty:
+            st.session_state["result_df"] = res_df
+        if isinstance(stats_obj, dict):
+            st.session_state["stats"] = stats_obj
+        if codes:
+            st.session_state["selected_codes"] = codes
+        # 若用户未选择目标日，则使用上次目标日
+        if last_date:
+            target_date = last_date
+    except Exception:
+        pass
 
 # 渲染：无论是否点击过“运行筛选”，只要有结果就展示并可交互
 result_df = st.session_state.get("result_df")
@@ -125,11 +187,21 @@ if result_df is not None and not result_df.empty:
         help="选择后页面即会重载，但已选项会被保留。",
     )
 
+    # 每次用户更改选中项后，持久化保存
+    _save_ui_state(st.session_state.get("result_df"), st.session_state.get("stats"), st.session_state.get("selected_codes"), target_date)
+
     # 实时状态与提醒设置
     st.markdown("---")
     st.subheader("实时状态")
     cfg = rt_load_config()
-    default_codes = st.session_state.get("selected_codes", cfg.get("tracked_codes", []))
+    # 选择优先级：SessionState -> 本地持久化 -> 配置文件
+    persisted_codes = []
+    try:
+        if SELECTED_CODES_PATH.exists():
+            persisted_codes = json.loads(SELECTED_CODES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    default_codes = st.session_state.get("selected_codes", persisted_codes if persisted_codes else cfg.get("tracked_codes", []))
     poll_min_default = int(cfg.get("poll_interval_sec", 300)) // 60
     alert_pct_default = float(cfg.get("alert_threshold_pct", 3.0))
     retention_days_default = int(cfg.get("retention_days", 7))
@@ -270,6 +342,23 @@ st.subheader("实时服务控制与状态")
 col_ctrl = st.columns(4)
 with col_ctrl[0]:
     if st.button("启动实时服务"):
+        # 在启动前同步 tracked_codes 到配置，确保服务能采集
+        cfg = rt_load_config()
+        codes_for_service = st.session_state.get("selected_codes")
+        if not codes_for_service:
+            try:
+                if SELECTED_CODES_PATH.exists():
+                    codes_for_service = json.loads(SELECTED_CODES_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                codes_for_service = []
+        if codes_for_service:
+            new_cfg = {
+                "tracked_codes": list(codes_for_service),
+                "poll_interval_sec": int(cfg.get("poll_interval_sec", 300)),
+                "alert_threshold_pct": float(cfg.get("alert_threshold_pct", 3.0)),
+                "retention_days": int(cfg.get("retention_days", 7)),
+            }
+            rt_save_config(new_cfg)
         set_service_control(paused=False, stop=False)
         try:
             subprocess.Popen([sys.executable, "-m", "alphahunter.realtime_service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
