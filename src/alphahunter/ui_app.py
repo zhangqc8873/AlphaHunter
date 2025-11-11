@@ -47,6 +47,14 @@ sleep_seconds = st.sidebar.number_input("每请求休眠秒数", value=float(DEF
 
 run_btn = st.sidebar.button("运行筛选")
 
+# 会话状态：持久化筛选结果与选中代码，避免交互导致页面重载后丢失
+if "result_df" not in st.session_state:
+    st.session_state["result_df"] = pd.DataFrame()
+if "stats" not in st.session_state:
+    st.session_state["stats"] = None
+if "selected_codes" not in st.session_state:
+    st.session_state["selected_codes"] = []
+
 
 def apply_indicator_config():
     DEFAULT_CONFIG.enable_indicator_filter = enable_ind
@@ -76,94 +84,110 @@ def run_screening_with_progress(date: str):
 if run_btn:
     apply_indicator_config()
     with st.spinner("正在获取并筛选强势股..."):
-        # 带进度的筛选
         result_df, stats = run_screening_with_progress(target_date)
-    if result_df is None or result_df.empty:
-        st.warning("未找到强势股或数据源暂不可用。")
-    else:
-        st.success(f"找到 {len(result_df)} 只强势股")
+    # 写入会话状态，避免后续交互导致数据丢失
+    st.session_state["result_df"] = result_df
+    st.session_state["stats"] = stats
+    # 初始化默认选中
+    if result_df is not None and not result_df.empty:
+        codes_default = result_df["代码"].astype(str).tolist()[: min(10, len(result_df))] if "代码" in result_df.columns else []
+        st.session_state["selected_codes"] = codes_default
+
+# 渲染：无论是否点击过“运行筛选”，只要有结果就展示并可交互
+result_df = st.session_state.get("result_df")
+stats = st.session_state.get("stats")
+if result_df is not None and not result_df.empty:
+    st.success(f"找到 {len(result_df)} 只强势股")
+    if stats:
         with st.expander("筛选阶段统计"):
             st.write(stats)
-        st.dataframe(result_df, use_container_width=True)
+    st.dataframe(result_df, use_container_width=True)
 
-        # 选择个股进行跟踪
-        codes = result_df["代码"].astype(str).tolist() if "代码" in result_df.columns else []
-        selected_codes = st.multiselect("选择需要跟踪的股票代码", options=codes, default=codes[: min(10, len(codes))])
+    # 选择个股进行跟踪（持久化选中项）
+    codes = result_df["代码"].astype(str).tolist() if "代码" in result_df.columns else []
+    st.multiselect(
+        "选择需要跟踪的股票代码",
+        options=codes,
+        default=st.session_state.get("selected_codes", []),
+        key="selected_codes",
+        help="选择后页面即会重载，但已选项会被保留。",
+    )
 
-        # 价格跟踪可视化
-        if selected_codes:
-            end_date = yyyyMMdd(today)
-            start_date = yyyyMMdd(today - dt.timedelta(days=track_days))
-            tabs = st.tabs([f"{code}" for code in selected_codes])
-            progress = st.progress(0)
-            source_counts = {"em": 0, "sina": 0, "tx": 0}
-            failed_codes: List[str] = []
-            for idx, (tab, code) in enumerate(zip(tabs, selected_codes), start=1):
-                with tab:
-                    hist = get_symbol_hist_range(code, start_date=start_date, end_date=end_date, use_cache=True)
-                    if hist is None or hist.empty:
-                        failed_codes.append(code)
-                        st.warning("该股票区间数据不可用（已自动重试多个数据源）")
-                        progress.progress(int(idx / len(selected_codes) * 100))
-                        continue
-                    hist = hist.copy()
-                    # 统计数据源
-                    if "source" in hist.columns:
-                        src = str(hist["source"].iloc[0])
-                        if src in source_counts:
-                            source_counts[src] += 1
-                    # 日期与列检查
-                    if "日期" in hist.columns:
-                        hist["日期"] = pd.to_datetime(hist["日期"])
-                    if "close" not in hist.columns:
-                        st.warning("缺少收盘价，无法绘图")
-                        progress.progress(int(idx / len(selected_codes) * 100))
-                        continue
-                    # 指标计算
-                    close = pd.to_numeric(hist["close"], errors="coerce")
-                    hist["RSI"] = compute_rsi(close, window=DEFAULT_CONFIG.rsi_window)
-                    macd_df = compute_macd(close, fast=DEFAULT_CONFIG.macd_fast, slow=DEFAULT_CONFIG.macd_slow, signal=DEFAULT_CONFIG.macd_signal)
-                    hist["MACD_hist"] = macd_df["hist"].values
+    # 价格跟踪可视化
+    selected_codes = st.session_state.get("selected_codes", [])
+    if selected_codes:
+        end_date = yyyyMMdd(today)
+        start_date = yyyyMMdd(today - dt.timedelta(days=track_days))
+        tabs = st.tabs([f"{code}" for code in selected_codes])
+        progress = st.progress(0)
+        source_counts = {"em": 0, "sina": 0, "tx": 0}
+        failed_codes: List[str] = []
+        for idx, (tab, code) in enumerate(zip(tabs, selected_codes), start=1):
+            with tab:
+                hist = get_symbol_hist_range(code, start_date=start_date, end_date=end_date, use_cache=True)
+                if hist is None or hist.empty:
+                    failed_codes.append(code)
+                    st.warning("该股票区间数据不可用（已自动重试多个数据源）")
+                    progress.progress(int(idx / len(selected_codes) * 100))
+                    continue
+                hist = hist.copy()
+                # 统计数据源
+                if "source" in hist.columns:
+                    src = str(hist["source"].iloc[0])
+                    if src in source_counts:
+                        source_counts[src] += 1
+                # 日期与列检查
+                if "日期" in hist.columns:
+                    hist["日期"] = pd.to_datetime(hist["日期"])
+                if "close" not in hist.columns:
+                    st.warning("缺少收盘价，无法绘图")
+                    progress.progress(int(idx / len(selected_codes) * 100))
+                    continue
+                # 指标计算
+                close = pd.to_numeric(hist["close"], errors="coerce")
+                hist["RSI"] = compute_rsi(close, window=DEFAULT_CONFIG.rsi_window)
+                macd_df = compute_macd(close, fast=DEFAULT_CONFIG.macd_fast, slow=DEFAULT_CONFIG.macd_slow, signal=DEFAULT_CONFIG.macd_signal)
+                hist["MACD_hist"] = macd_df["hist"].values
 
-                    # 简要数据源标注
-                    if "source" in hist.columns:
-                        st.caption(f"数据源：{hist['source'].iloc[0]}")
+                # 简要数据源标注
+                if "source" in hist.columns:
+                    st.caption(f"数据源：{hist['source'].iloc[0]}")
 
-                    # 上方K线/收盘价折线，下方RSI与MACD柱体
-                    st.line_chart(hist.set_index("日期")["close"], height=200)
-                    st.line_chart(hist.set_index("日期")["RSI"], height=150)
-                    st.bar_chart(hist.set_index("日期")["MACD_hist"], height=150)
+                # 上方K线/收盘价折线，下方RSI与MACD柱体
+                st.line_chart(hist.set_index("日期")["close"], height=200)
+                st.line_chart(hist.set_index("日期")["RSI"], height=150)
+                st.bar_chart(hist.set_index("日期")["MACD_hist"], height=150)
 
-                    # 简单评估：从目标日到最新日的收益率（若目标日在区间内）
-                    perf_col = st.columns(3)
-                    try:
-                        if "日期" in hist.columns and "close" in hist.columns:
-                            if pd.to_datetime(target_date) in hist["日期"].values:
-                                start_close = float(hist.loc[hist["日期"] == pd.to_datetime(target_date), "close"].iloc[0])
-                                last_close = float(hist["close"].iloc[-1])
-                                ret = (last_close / start_close - 1.0) * 100.0
-                                perf_col[0].metric("自目标日起收益率%", f"{ret:.2f}%")
-                            else:
-                                perf_col[0].write("目标日不在跟踪区间内")
-                        perf_col[1].metric("最新收盘价", f"{hist['close'].iloc[-1]:.2f}")
-                        perf_col[2].metric("RSI(末值)", f"{hist['RSI'].iloc[-1]:.1f}")
-                    except Exception:
-                        pass
+                # 简单评估：从目标日到最新日的收益率（若目标日在区间内）
+                perf_col = st.columns(3)
+                try:
+                    if "日期" in hist.columns and "close" in hist.columns:
+                        if pd.to_datetime(target_date) in hist["日期"].values:
+                            start_close = float(hist.loc[hist["日期"] == pd.to_datetime(target_date), "close"].iloc[0])
+                            last_close = float(hist["close"].iloc[-1])
+                            ret = (last_close / start_close - 1.0) * 100.0
+                            perf_col[0].metric("自目标日起收益率%", f"{ret:.2f}%")
+                        else:
+                            perf_col[0].write("目标日不在跟踪区间内")
+                    perf_col[1].metric("最新收盘价", f"{hist['close'].iloc[-1]:.2f}")
+                    perf_col[2].metric("RSI(末值)", f"{hist['RSI'].iloc[-1]:.1f}")
+                except Exception:
+                    pass
 
-                progress.progress(int(idx / len(selected_codes) * 100))
+            progress.progress(int(idx / len(selected_codes) * 100))
 
-            with st.expander("数据源与失败统计"):
-                total = len(selected_codes)
-                st.write({"总数": total, "失败数": len(failed_codes), "东财": source_counts["em"], "新浪": source_counts["sina"], "腾讯": source_counts["tx"]})
-                if failed_codes:
-                    st.write("失败代码：", ", ".join(failed_codes))
+        with st.expander("数据源与失败统计"):
+            total = len(selected_codes)
+            st.write({"总数": total, "失败数": len(failed_codes), "东财": source_counts["em"], "新浪": source_counts["sina"], "腾讯": source_counts["tx"]})
+            if failed_codes:
+                st.write("失败代码：", ", ".join(failed_codes))
 
-        # 导出筛选结果
-        st.download_button(
-            label="下载筛选结果CSV",
-            data=result_df.to_csv(index=False, encoding="utf-8-sig"),
-            file_name=f"strong_stocks_{target_date}.csv",
-            mime="text/csv",
-        )
+    # 导出筛选结果
+    st.download_button(
+        label="下载筛选结果CSV",
+        data=result_df.to_csv(index=False, encoding="utf-8-sig"),
+        file_name=f"strong_stocks_{target_date}.csv",
+        mime="text/csv",
+    )
 else:
     st.info("在左侧选择参数并点击“运行筛选”开始。")
