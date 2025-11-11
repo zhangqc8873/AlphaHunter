@@ -2,6 +2,7 @@ import json
 import time
 import gzip
 from datetime import datetime, timedelta
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -22,6 +23,9 @@ CONFIG_PATH = REALTIME_DIR / "realtime_config.json"
 LATEST_PATH = REALTIME_DIR / "realtime_latest.csv"
 LOG_DIR = REALTIME_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CONTROL_PATH = REALTIME_DIR / "control.json"
+STATUS_PATH = REALTIME_DIR / "service_status.json"
+PID_PATH = REALTIME_DIR / "service_pid.txt"
 
 
 DEFAULT_SERVICE_CONFIG = {
@@ -46,6 +50,22 @@ def save_config(cfg: Dict) -> None:
     clean = DEFAULT_SERVICE_CONFIG.copy()
     clean.update({k: v for k, v in cfg.items() if k in clean})
     CONFIG_PATH.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_control() -> Dict:
+    if CONTROL_PATH.exists():
+        try:
+            return json.loads(CONTROL_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"paused": False, "stop": False}
+
+
+def _write_control(ctrl: Dict) -> None:
+    clean = {"paused": bool(ctrl.get("paused", False)), "stop": bool(ctrl.get("stop", False))}
+    tmp = CONTROL_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(CONTROL_PATH)
 
 
 def is_trading_time_now(ts: datetime | None = None) -> bool:
@@ -74,6 +94,12 @@ def _extract_price_col(df: pd.DataFrame) -> str | None:
 def _atomic_write_csv(df: pd.DataFrame, path: Path) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     df.to_csv(tmp, index=False, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _atomic_write_json(obj: Dict, path: Path) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -155,16 +181,80 @@ def run_service(loop_once: bool = False) -> None:
     tracked_codes: List[str] = list(cfg.get("tracked_codes", []))
     retention_days = int(cfg.get("retention_days", 7))
 
+    # init status
+    start_ts = datetime.now()
+    try:
+        PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+    error_count = 0
+    _atomic_write_json({
+        "running": True,
+        "pid": os.getpid(),
+        "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_poll_time": None,
+        "progress_pct": 0.0,
+        "error_count": 0,
+        "trading": is_trading_time_now(start_ts),
+        "paused": False,
+        "stop_requested": False,
+    }, STATUS_PATH)
+
     while True:
         now = datetime.now()
-        if is_trading_time_now(now) and tracked_codes:
+        ctrl = _read_control()
+        trading_flag = is_trading_time_now(now)
+        if ctrl.get("stop", False):
+            _atomic_write_json({
+                "running": False,
+                "pid": os.getpid(),
+                "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "last_poll_time": None,
+                "progress_pct": 0.0,
+                "error_count": error_count,
+                "trading": trading_flag,
+                "paused": ctrl.get("paused", False),
+                "stop_requested": True,
+            }, STATUS_PATH)
+            break
+
+        if ctrl.get("paused", False):
+            _atomic_write_json({
+                "running": True,
+                "pid": os.getpid(),
+                "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "last_poll_time": None,
+                "progress_pct": 0.0,
+                "error_count": error_count,
+                "trading": trading_flag,
+                "paused": True,
+                "stop_requested": False,
+            }, STATUS_PATH)
+            time.sleep(2)
+            if loop_once:
+                break
+            continue
+
+        if trading_flag and tracked_codes:
             try:
                 spot_df, tracked_df = one_poll(tracked_codes, alert_threshold)
                 if len(tracked_df) > 0:
                     _atomic_write_csv(tracked_df, LATEST_PATH)
                     _append_log(tracked_df, now, retention_days)
+                _atomic_write_json({
+                    "running": True,
+                    "pid": os.getpid(),
+                    "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_poll_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "progress_pct": 0.0,
+                    "error_count": error_count,
+                    "trading": trading_flag,
+                    "paused": False,
+                    "stop_requested": False,
+                }, STATUS_PATH)
             except Exception:
                 # Avoid crashing service on transient errors
+                error_count += 1
                 time.sleep(5)
         else:
             # When not trading, still update LATEST with a heartbeat
@@ -176,9 +266,31 @@ def run_service(loop_once: bool = False) -> None:
                 _atomic_write_csv(hb, LATEST_PATH)
             except Exception:
                 pass
+            _atomic_write_json({
+                "running": True,
+                "pid": os.getpid(),
+                "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "last_poll_time": None,
+                "progress_pct": 0.0,
+                "error_count": error_count,
+                "trading": trading_flag,
+                "paused": False,
+                "stop_requested": False,
+            }, STATUS_PATH)
 
         if loop_once:
             break
+        # update progress (elapsed over interval)
+        elapsed = (datetime.now() - now).total_seconds()
+        pct = max(0.0, min(100.0, (elapsed / poll_interval) * 100.0))
+        try:
+            cur = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            cur = {}
+        cur.update({
+            "progress_pct": pct,
+        })
+        _atomic_write_json(cur, STATUS_PATH)
         time.sleep(poll_interval)
 
 
@@ -189,6 +301,24 @@ def read_latest_snapshot() -> pd.DataFrame:
         except Exception:
             return pd.DataFrame()
     return pd.DataFrame()
+
+
+def read_service_status() -> Dict:
+    if STATUS_PATH.exists():
+        try:
+            return json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def set_service_control(paused: bool | None = None, stop: bool | None = None) -> None:
+    ctrl = _read_control()
+    if paused is not None:
+        ctrl["paused"] = bool(paused)
+    if stop is not None:
+        ctrl["stop"] = bool(stop)
+    _write_control(ctrl)
 
 
 if __name__ == "__main__":

@@ -22,8 +22,12 @@ from alphahunter.realtime_service import (
     load_config as rt_load_config,
     read_latest_snapshot,
     is_trading_time_now,
+    read_service_status,
+    set_service_control,
 )
 from alphahunter.filters import compute_rsi, compute_macd
+import subprocess
+import os
 
 
 st.set_page_config(page_title="AlphaHunter 强势股跟踪", layout="wide")
@@ -257,3 +261,92 @@ if result_df is not None and not result_df.empty:
     )
 else:
     st.info("在左侧选择参数并点击“运行筛选”开始。")
+
+# ===== 实时服务控制与状态监控 =====
+st.markdown("---")
+st.subheader("实时服务控制与状态")
+
+# 控制按钮
+col_ctrl = st.columns(4)
+with col_ctrl[0]:
+    if st.button("启动实时服务"):
+        set_service_control(paused=False, stop=False)
+        try:
+            subprocess.Popen([sys.executable, "-m", "alphahunter.realtime_service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            st.success("已尝试启动后台实时服务。")
+        except Exception as e:
+            st.error(f"启动失败：{e}")
+with col_ctrl[1]:
+    if st.button("停止服务"):
+        set_service_control(stop=True)
+        st.warning("已请求停止后台服务。")
+with col_ctrl[2]:
+    if st.button("暂停服务"):
+        set_service_control(paused=True, stop=False)
+        st.info("已请求暂停后台服务。")
+with col_ctrl[3]:
+    if st.button("继续服务"):
+        set_service_control(paused=False, stop=False)
+        st.success("已请求继续运行后台服务。")
+
+# 状态与进度显示
+status = read_service_status() or {}
+running = bool(status.get("running", False))
+paused = bool(status.get("paused", False))
+stop_req = bool(status.get("stop_requested", False))
+error_count = int(status.get("error_count", 0)) if status.get("error_count") is not None else 0
+start_time = status.get("start_time")
+last_poll_time = status.get("last_poll_time")
+progress_pct = float(status.get("progress_pct", 0.0))
+
+state_text = "已停止" if stop_req or not running else ("暂停中" if paused else "运行中")
+st.caption(f"服务状态：{state_text} | 错误计数：{error_count}")
+st.progress(int(progress_pct))
+
+cols = st.columns(3)
+with cols[0]:
+    st.metric("启动时间", start_time or "-")
+with cols[1]:
+    st.metric("最近采集", last_poll_time or "-")
+with cols[2]:
+    try:
+        if start_time:
+            _start_dt = pd.to_datetime(start_time)
+            dur = pd.Timestamp.now() - _start_dt
+            hours = int(dur.total_seconds() // 3600)
+            mins = int((dur.total_seconds() % 3600) // 60)
+            st.metric("运行时长", f"{dur.days}天 {hours%24}小时 {mins}分")
+        else:
+            st.metric("运行时长", "-")
+    except Exception:
+        st.metric("运行时长", "-")
+
+# 服务日志输出与历史记录
+st.markdown("### 服务日志输出")
+log_dir = Path(DEFAULT_CONFIG.cache_dir) / "realtime" / "logs"
+today_str = dt.datetime.now().strftime("%Y%m%d")
+log_path = log_dir / f"prices_{today_str}.csv"
+if log_path.exists():
+    try:
+        log_df = pd.read_csv(log_path)
+        st.dataframe(log_df.tail(50), use_container_width=True)
+    except Exception as e:
+        st.error(f"读取日志失败：{e}")
+else:
+    st.info("暂无当日日志，服务可能尚未运行或尚未采集。")
+
+st.markdown("### 历史进度记录")
+hist_counts = []
+if log_dir.exists():
+    for p in sorted(log_dir.glob("prices_*.csv"))[-5:]:
+        try:
+            dfp = pd.read_csv(p)
+            hist_counts.append((p.name, len(dfp)))
+        except Exception:
+            pass
+    for gz in sorted(log_dir.glob("prices_*.csv.gz"))[-5:]:
+        hist_counts.append((gz.name, None))
+if hist_counts:
+    st.write({name: (count if count is not None else "gz存档") for name, count in hist_counts})
+else:
+    st.write("暂无历史记录")
