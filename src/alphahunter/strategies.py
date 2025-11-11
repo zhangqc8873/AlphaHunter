@@ -12,7 +12,7 @@ except Exception as e:  # pragma: no cover
 
 from .cache import cacheable_df
 from .config import DEFAULT_CONFIG
-from .filters import compute_rsi, compute_macd
+from .filters import compute_rsi, compute_macd, _offset_days
 from .data_fetch import get_symbol_hist_range
 
 
