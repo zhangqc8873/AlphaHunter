@@ -4,6 +4,7 @@ import datetime as dt
 from typing import List
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 from pathlib import Path
@@ -136,15 +137,16 @@ if result_df is not None and not result_df.empty:
                     src = str(hist["source"].iloc[0])
                     if src in source_counts:
                         source_counts[src] += 1
-                # 日期与列检查
+                # 日期与列检查与清理
                 if "日期" in hist.columns:
-                    hist["日期"] = pd.to_datetime(hist["日期"])
+                    hist["日期"] = pd.to_datetime(hist["日期"], errors="coerce")
                 if "close" not in hist.columns:
                     st.warning("缺少收盘价，无法绘图")
                     progress.progress(int(idx / len(selected_codes) * 100))
                     continue
                 # 指标计算
                 close = pd.to_numeric(hist["close"], errors="coerce")
+                hist["close"] = close
                 hist["RSI"] = compute_rsi(close, window=DEFAULT_CONFIG.rsi_window)
                 macd_df = compute_macd(close, fast=DEFAULT_CONFIG.macd_fast, slow=DEFAULT_CONFIG.macd_slow, signal=DEFAULT_CONFIG.macd_signal)
                 hist["MACD_hist"] = macd_df["hist"].values
@@ -153,10 +155,27 @@ if result_df is not None and not result_df.empty:
                 if "source" in hist.columns:
                     st.caption(f"数据源：{hist['source'].iloc[0]}")
 
+                # 数据清理：去除无效日期与非有限值，避免 Vega-Lite Infinity 告警
+                price_df = hist[["日期", "close"]].dropna().copy()
+                price_df = price_df[np.isfinite(price_df["close"])]
+                rsi_df = hist[["日期", "RSI"]].dropna().copy()
+                rsi_df = rsi_df[np.isfinite(rsi_df["RSI"])]
+                macd_plot_df = hist[["日期", "MACD_hist"]].dropna().copy()
+                macd_plot_df = macd_plot_df[np.isfinite(macd_plot_df["MACD_hist"])]
+
                 # 上方K线/收盘价折线，下方RSI与MACD柱体
-                st.line_chart(hist.set_index("日期")["close"], height=200)
-                st.line_chart(hist.set_index("日期")["RSI"], height=150)
-                st.bar_chart(hist.set_index("日期")["MACD_hist"], height=150)
+                if not price_df.empty:
+                    st.line_chart(price_df.set_index("日期")["close"], height=200)
+                else:
+                    st.warning("价格序列为空或全部为无效值，无法绘图")
+                if not rsi_df.empty:
+                    st.line_chart(rsi_df.set_index("日期")["RSI"], height=150)
+                else:
+                    st.info("RSI 序列为空或全部为无效值")
+                if not macd_plot_df.empty:
+                    st.bar_chart(macd_plot_df.set_index("日期")["MACD_hist"], height=150)
+                else:
+                    st.info("MACD 柱体序列为空或全部为无效值")
 
                 # 简单评估：从目标日到最新日的收益率（若目标日在区间内）
                 perf_col = st.columns(3)
