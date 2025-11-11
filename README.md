@@ -1,0 +1,59 @@
+# AlphaHunter — A股强势股票筛选系统
+
+## 功能概述
+- 使用 `akshare` 获取A股实时与历史数据
+- 支持多条件强势筛选：涨幅前X%、量能放大、可选技术指标（RSI/MACD）
+- 数据清洗、排序与磁盘缓存
+- 结果输出为 `CSV/JSON/XLSX` 并生成可视化柱状图
+
+## 快速开始
+1) 安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+2) 运行（实时模式）：
+
+```bash
+python -m alphahunter.main --top_percent 10 --output csv,json
+```
+
+3) 运行（历史模式）：
+
+```bash
+python -m alphahunter.main --date 20240105 --top_percent 10 --vol_ratio 2.0 --output csv,json,xlsx
+```
+
+> 注意：历史模式需要逐股拉取日线，首次运行较慢。建议设置 `--max_symbols` 限制拉取数量以验证流程。
+
+## 强势筛选说明
+- 涨幅前X%：对当日涨幅进行分位筛选，保留前X%的股票。
+- 成交量放大：目标日成交量 / 过去5日均量 ≥ 指定倍数。
+- 技术指标：提供 `RSI/MACD` 计算函数，可扩展为筛选条件。
+
+## 输出目录
+- 缓存：`.cache/`
+- 结果：`outputs/` 下的 `*.csv` / `*.json` / `*.xlsx` 与图表 `chart_*.png`
+
+## 常见问题
+- akshare历史接口说明：`stock_zh_a_spot_em` 提供实时市场快照；历史日线需使用 `stock_zh_a_hist` 对单股逐个拉取。
+- 若接口调用失败：系统会跳过错误个股并继续处理，建议开启缓存避免重复调用。
+
+## 后续计划（与需求对应）
+1. 完善技术指标作为可选筛选条件的配置化
+2. 增加邮件通知
+3. 打包为可执行与Docker化部署，提供定时任务脚本
+4. 单元与集成测试覆盖
+4) 综合强势股方案（推荐）：
+
+```bash
+python -m alphahunter.main --strategy comprehensive --date 20241101 --output csv,json
+```
+
+> 综合方案将依次使用涨停股池、龙虎榜与板块轮动补充，自动去重并保存 `strong_stocks_YYYYMMDD.*`。
+
+### 人气榜冗余与指标过滤
+- 冗余现成榜单：综合策略同时接入东方财富个股人气榜与飙升榜，作为快速补充来源。
+- 指标过滤辅助：对综合结果的前 `max_symbols_indicator_check` 只股票做 RSI/MACD 检查，默认过滤条件 `RSI>=50 且 MACD柱体>=0`，可在 `config.py` 中调整。
+- 关闭指标过滤：`--no_indicators` 开关。
