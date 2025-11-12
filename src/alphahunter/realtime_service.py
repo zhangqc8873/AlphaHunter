@@ -235,35 +235,70 @@ def run_service(loop_once: bool = False) -> None:
                 break
             continue
 
-        if trading_flag and tracked_codes:
-            try:
-                spot_df, tracked_df = one_poll(tracked_codes, alert_threshold)
-                if len(tracked_df) > 0:
-                    _atomic_write_csv(tracked_df, LATEST_PATH)
-                    _append_log(tracked_df, now, retention_days)
+        if trading_flag:
+            if tracked_codes:
+                try:
+                    spot_df, tracked_df = one_poll(tracked_codes, alert_threshold)
+                    if len(tracked_df) > 0:
+                        _atomic_write_csv(tracked_df, LATEST_PATH)
+                        _append_log(tracked_df, now, retention_days)
+                    else:
+                        # 在交易时段但未产生数据（例如所选股票不在快照中），写入心跳并记录日志
+                        hb = pd.DataFrame({
+                            "采集时间": [now.strftime("%Y-%m-%d %H:%M:%S")],
+                            "状态": ["数据不可用"],
+                        })
+                        try:
+                            _atomic_write_csv(hb, LATEST_PATH)
+                            _append_log(hb, now, retention_days)
+                        except Exception:
+                            pass
+                    _atomic_write_json({
+                        "running": True,
+                        "pid": os.getpid(),
+                        "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        "last_poll_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "progress_pct": 0.0,
+                        "error_count": error_count,
+                        "trading": trading_flag,
+                        "paused": False,
+                        "stop_requested": False,
+                    }, STATUS_PATH)
+                except Exception:
+                    # Avoid crashing service on transient errors
+                    error_count += 1
+                    time.sleep(5)
+            else:
+                # 在交易时段但未选择股票，写入心跳并记录日志，避免误显示为“非交易时段”
+                hb = pd.DataFrame({
+                    "采集时间": [now.strftime("%Y-%m-%d %H:%M:%S")],
+                    "状态": ["未选择股票"],
+                })
+                try:
+                    _atomic_write_csv(hb, LATEST_PATH)
+                    _append_log(hb, now, retention_days)
+                except Exception:
+                    pass
                 _atomic_write_json({
                     "running": True,
                     "pid": os.getpid(),
                     "start_time": start_ts.strftime("%Y-%m-%d %H:%M:%S"),
-                    "last_poll_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_poll_time": None,
                     "progress_pct": 0.0,
                     "error_count": error_count,
                     "trading": trading_flag,
                     "paused": False,
                     "stop_requested": False,
                 }, STATUS_PATH)
-            except Exception:
-                # Avoid crashing service on transient errors
-                error_count += 1
-                time.sleep(5)
         else:
-            # When not trading, still update LATEST with a heartbeat
+            # 非交易时段，写入心跳并记录日志
             hb = pd.DataFrame({
                 "采集时间": [now.strftime("%Y-%m-%d %H:%M:%S")],
                 "状态": ["非交易时段"],
             })
             try:
                 _atomic_write_csv(hb, LATEST_PATH)
+                _append_log(hb, now, retention_days)
             except Exception:
                 pass
             _atomic_write_json({
