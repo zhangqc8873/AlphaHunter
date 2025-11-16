@@ -32,23 +32,63 @@ def to_em_symbol(code: str) -> str:
 @cacheable_df(lambda provider="em": f"realtime_spot_{provider}")
 def get_realtime_spot(provider: str = "em", use_cache: bool = True) -> pd.DataFrame:
     """获取A股实时行情快照。
-    采用 Eastmoney 源：stock_zh_a_spot_em
+    多数据源自动回退：优先尝试新浪，失败后尝试东方财富
     """
-    if provider == "em":
-        df = ak.stock_zh_a_spot_em()
-    else:
-        df = ak.stock_zh_a_spot()
-    # 标准化列名
-    df = df.copy()
-    # 尝试统一涨跌幅列
-    if "涨跌幅" in df.columns:
-        df.rename(columns={"涨跌幅": "pct_chg"}, inplace=True)
-    elif "涨幅" in df.columns:
-        df.rename(columns={"涨幅": "pct_chg"}, inplace=True)
-    # 统一代码列
-    if "代码" not in df.columns and "code" in df.columns:
-        df.rename(columns={"code": "代码"}, inplace=True)
-    return df
+    import time
+    
+    def _standardize_columns(df: pd.DataFrame, source: str) -> pd.DataFrame:
+        """标准化列名"""
+        if df is None or df.empty:
+            return pd.DataFrame()
+        
+        df = df.copy()
+        
+        # 统一代码列
+        if "代码" not in df.columns:
+            for col in ["code", "股票代码", "证券代码"]:
+                if col in df.columns:
+                    df.rename(columns={col: "代码"}, inplace=True)
+                    break
+        
+        # 统一涨跌幅列
+        if "pct_chg" not in df.columns:
+            for col in ["涨跌幅", "涨幅", "涨跌幅%"]:
+                if col in df.columns:
+                    df.rename(columns={col: "pct_chg"}, inplace=True)
+                    break
+        
+        # 添加数据源标记
+        df["data_source"] = source
+        
+        return df
+    
+    # 尝试顺序：新浪 -> 东方财富 -> 通用接口
+    sources = [
+        ("sina", lambda: ak.stock_zh_a_spot()),  # 新浪财经（通常更稳定）
+        ("em", lambda: ak.stock_zh_a_spot_em()),  # 东方财富
+    ]
+    
+    last_error = None
+    for source_name, fetch_func in sources:
+        try:
+            print(f"[调试] 尝试从 {source_name} 获取实时数据...")
+            df = fetch_func()
+            if df is not None and not df.empty:
+                df = _standardize_columns(df, source_name)
+                print(f"[成功] 从 {source_name} 获取到 {len(df)} 条数据")
+                return df
+            else:
+                print(f"[警告] {source_name} 返回数据为空")
+        except Exception as e:
+            last_error = e
+            print(f"[失败] {source_name} 错误: {str(e)[:100]}")
+            time.sleep(1)  # 等待1秒后尝试下一个数据源
+            continue
+    
+    # 所有数据源都失败
+    if last_error:
+        raise last_error
+    return pd.DataFrame()
 
 
 def list_a_stock_codes() -> List[str]:

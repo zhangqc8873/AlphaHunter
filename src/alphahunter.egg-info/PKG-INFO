@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: alphahunter
+Version: 0.1.0
+Summary: A-share strong stocks screening system using Akshare
+Author: AlphaHunter
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: akshare>=1.12.35
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: matplotlib>=3.7.0
+Requires-Dist: seaborn>=0.12.0
+Requires-Dist: openpyxl>=3.1.0
+Requires-Dist: streamlit>=1.32.0
+
 # AlphaHunter — A股强势股票筛选系统
 
 ## 功能概述
@@ -5,13 +20,8 @@
 - 支持多条件强势筛选：涨幅前X%、量能放大、可选技术指标（RSI/MACD）
 - 数据清洗、排序与磁盘缓存
 - 结果输出为 `CSV/JSON/XLSX` 并生成可视化柱状图
-- **实时价格更新**：筛选列表中的股票支持实时价格和涨跌额更新
-- **Web UI 界面**：通过 Streamlit 提供交互式界面，支持实时监控和价格追踪
 
 ## 快速开始
-
-### 命令行模式
-
 1) 安装依赖：
 
 ```bash
@@ -30,28 +40,7 @@ python -m alphahunter.main --top_percent 10 --output csv,json
 python -m alphahunter.main --date 20240105 --top_percent 10 --vol_ratio 2.0 --output csv,json,xlsx
 ```
 
-4) 综合强势股方案（推荐）：
-
-```bash
-python -m alphahunter.main --strategy comprehensive --date 20241101 --output csv,json
-```
-
 > 注意：历史模式需要逐股拉取日线，首次运行较慢。建议设置 `--max_symbols` 限制拉取数量以验证流程。
-
-### Web UI 模式
-
-1) 启动 Streamlit UI：
-
-```bash
-streamlit run src/alphahunter/ui_app.py
-```
-
-2) 浏览器访问：http://localhost:8501
-
-3) **实时价格更新功能**：
-   - 点击 "🔄 刷新实时价格" 按钮手动刷新
-   - 勾选 "自动刷新" 复选框启用每60秒自动更新
-   - 筛选结果表格将显示实时的最新价和涨跌额
 
 ## 强势筛选说明
 - 涨幅前X%：对当日涨幅进行分位筛选，保留前X%的股票。
@@ -71,10 +60,7 @@ streamlit run src/alphahunter/ui_app.py
 2. 增加邮件通知
 3. 打包为可执行与Docker化部署，提供定时任务脚本
 4. 单元与集成测试覆盖
-
-## 综合强势股筛选
-
-### 命令行模式
+4) 综合强势股方案（推荐）：
 
 ```bash
 python -m alphahunter.main --strategy comprehensive --date 20241101 --output csv,json

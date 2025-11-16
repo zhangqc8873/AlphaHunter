@@ -1,0 +1,3 @@
+[console_scripts]
+alphahunter = alphahunter.main:main
+alphahunter-realtime = alphahunter.realtime_service:run_service

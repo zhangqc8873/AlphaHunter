@@ -16,7 +16,7 @@ sys.path.append(str(ROOT / "src"))
 
 from alphahunter.config import DEFAULT_CONFIG
 from alphahunter.strategies import get_strong_stocks_comprehensive, get_strong_stocks_comprehensive_with_stats
-from alphahunter.data_fetch import get_symbol_hist_range
+from alphahunter.data_fetch import get_symbol_hist_range, get_realtime_spot
 from alphahunter.realtime_service import (
     save_config as rt_save_config,
     load_config as rt_load_config,
@@ -26,6 +26,7 @@ from alphahunter.realtime_service import (
     set_service_control,
 )
 from alphahunter.filters import compute_rsi, compute_macd
+from alphahunter.processing import clean_spot_df
 import subprocess
 import os
 import json
@@ -137,6 +138,108 @@ def run_screening_with_progress(date: str):
     return df, stats
 
 
+@st.cache_data(ttl=600, show_spinner=False)  # 缓存10分钟，给足够时间获取数据
+def get_realtime_prices():
+    """获取实时行情数据，带重试机制"""
+    import time
+    max_retries = 3
+    retry_delay = 2  # 秒
+    
+    for attempt in range(max_retries):
+        try:
+            spot = get_realtime_spot(use_cache=False)  # 不使用缓存，获取最新数据
+            if spot is None or spot.empty:
+                if attempt < max_retries - 1:
+                    print(f"[警告] 第{attempt+1}次获取数据为空，{retry_delay}秒后重试...")
+                    time.sleep(retry_delay)
+                    continue
+                return pd.DataFrame()
+            
+            spot = clean_spot_df(spot)
+            # 输出调试信息：显示可用列名
+            print(f"[调试] 实时数据列: {list(spot.columns)[:15]}...")  # 只显示前15个列
+            print(f"[成功] 获取到 {len(spot)} 条实时数据")
+            return spot
+            
+        except Exception as e:
+            error_msg = str(e)
+            if attempt < max_retries - 1:
+                print(f"[警告] 第{attempt+1}次获取失败: {error_msg}，{retry_delay}秒后重试...")
+                time.sleep(retry_delay)
+            else:
+                print(f"[错误] 获取实时数据失败（已重试{max_retries}次）: {error_msg}")
+                return pd.DataFrame()
+    
+    return pd.DataFrame()
+
+
+def merge_realtime_prices(result_df: pd.DataFrame) -> pd.DataFrame:
+    """将实时价格数据合并到筛选结果中"""
+    if result_df is None or result_df.empty:
+        return result_df
+    
+    # 获取实时行情
+    spot_df = get_realtime_prices()
+    if spot_df is None or spot_df.empty:
+        st.warning("无法获取实时行情数据，显示原始筛选结果")
+        return result_df
+    
+    # 确保代码列存在
+    if "代码" not in spot_df.columns:
+        st.warning("实时数据中缺少'代码'列，无法合并")
+        return result_df
+    
+    result_df_copy = result_df.copy()
+    
+    # 关键修复：确保代码保持为字符串并补齐6位
+    # 筛选结果的代码可能被转换成了数字，导致前导零丢失
+    result_df_copy["代码"] = result_df_copy["代码"].astype(str).str.strip().str.zfill(6)
+    result_df_copy["代码_匹配"] = result_df_copy["代码"]
+    
+    # 移除实时数据中的交易所前缀 (sh/sz/bj)，并补齐6位
+    spot_df["代码_匹配"] = spot_df["代码"].astype(str).str.replace(r'^(sh|sz|bj)', '', regex=True).str.strip().str.zfill(6)
+    
+    # 调试信息
+    st.caption(f"🔍 筛选代码: {result_df_copy['代码_匹配'].head(3).tolist()}")
+    st.caption(f"🔍 实时代码: {spot_df['代码_匹配'].head(3).tolist()}")
+    
+    # 准备要合并的列
+    merge_cols = ["代码_匹配"]
+    available_cols = []
+    for col in ["最新价", "涨跌额", "pct_chg", "名称"]:
+        if col in spot_df.columns:
+            available_cols.append(col)
+    
+    if len(available_cols) == 0:
+        st.warning(f"实时数据中未找到价格相关列。可用列: {list(spot_df.columns)}")
+        result_df_copy.drop(columns=["代码_匹配"], inplace=True, errors='ignore')
+        return result_df_copy
+    
+    merge_cols.extend(available_cols)
+    spot_subset = spot_df[merge_cols].copy()
+    
+    # 合并数据
+    merged = result_df_copy.merge(spot_subset, on="代码_匹配", how="left", suffixes=("", "_实时"))
+    
+    # 删除临时匹配列
+    merged.drop(columns=["代码_匹配"], inplace=True, errors='ignore')
+    
+    # 处理列名冲突
+    for col in ["最新价", "涨跌额", "pct_chg", "名称"]:
+        if f"{col}_实时" in merged.columns:
+            if col in merged.columns:
+                merged[col] = merged[f"{col}_实时"].combine_first(merged[col])
+            else:
+                merged[col] = merged[f"{col}_实时"]
+            merged.drop(columns=[f"{col}_实时"], inplace=True, errors='ignore')
+    
+    # 统计成功匹配数
+    success_count = merged["最新价"].notna().sum() if "最新价" in merged.columns else 0
+    st.success(f"✅ 已合并实时价格数据：{success_count}/{len(merged)} 条记录有最新价")
+    
+    return merged
+
+
 if run_btn:
     apply_indicator_config()
     with st.spinner("正在获取并筛选强势股..."):
@@ -166,7 +269,7 @@ else:
     except Exception:
         pass
 
-# 渲染：无论是否点击过“运行筛选”，只要有结果就展示并可交互
+# 渲染：无论是否点击过"运行筛选"，只要有结果就展示并可交互
 result_df = st.session_state.get("result_df")
 stats = st.session_state.get("stats")
 if result_df is not None and not result_df.empty:
@@ -174,7 +277,62 @@ if result_df is not None and not result_df.empty:
     if stats:
         with st.expander("筛选阶段统计"):
             st.write(stats)
-    st.dataframe(result_df, use_container_width=True)
+    
+    # 添加实时刷新按钮和自动刷新选项
+    col1, col2, col3 = st.columns([1, 1, 4])
+    with col1:
+        refresh_btn = st.button("🔄 刷新实时价格", key="refresh_prices")
+    with col2:
+        auto_refresh = st.checkbox("自动刷新", value=False, key="auto_refresh")
+    with col3:
+        if refresh_btn:
+            # 清除缓存以强制刷新
+            st.cache_data.clear()
+            st.rerun()
+    
+    # 自动刷新提示和实现（只在交易时段刷新）
+    if auto_refresh:
+        import time
+        from datetime import datetime
+        
+        # 检查当前是否在交易时段
+        is_trading = is_trading_time_now()
+        
+        # 初始化或获取上次刷新时间
+        if "last_refresh_time" not in st.session_state:
+            st.session_state["last_refresh_time"] = time.time()
+        
+        current_time = time.time()
+        elapsed = current_time - st.session_state["last_refresh_time"]
+        refresh_interval = 300  # 5分钟
+        
+        if is_trading:
+            remaining = max(0, refresh_interval - int(elapsed))
+            mins = remaining // 60
+            secs = remaining % 60
+            
+            if remaining > 0:
+                st.info(f"✅ 自动刷新已启用 | 下次刷新: {mins}分{secs}秒 | 交易时段")
+                # 等待1秒后重新运行，更新倒计时
+                time.sleep(1)
+                st.rerun()
+            else:
+                # 时间到了，刷新数据
+                st.session_state["last_refresh_time"] = current_time
+                st.cache_data.clear()
+                st.rerun()
+        else:
+            st.warning("⏸️ 当前非交易时段，自动刷新已暂停")
+            st.caption("交易时段：周一至周五 09:30-11:30, 13:00-15:00")
+            st.caption("将每60秒检查一次，进入交易时段后自动恢复")
+            # 非交易时段，每60秒检查一次
+            time.sleep(60)
+            st.rerun()
+    
+    # 合并实时价格数据
+    display_df = merge_realtime_prices(result_df)
+    
+    st.dataframe(display_df, use_container_width=True)
 
     # 选择个股进行跟踪（持久化选中项）
     codes = result_df["代码"].astype(str).tolist() if "代码" in result_df.columns else []
